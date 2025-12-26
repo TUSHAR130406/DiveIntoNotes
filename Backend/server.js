@@ -38,7 +38,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     res.json({
       message: "File processed successfully",
       filename: req.file.filename,
-      preview: extractedText.substring(0, 300),
+      totalChunks: extractedText.chunks.length,
+      previewChunks: extractedText.chunks.slice(0, 2),
     });
 
   } catch (err) {

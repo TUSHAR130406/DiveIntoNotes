@@ -1,25 +1,31 @@
 const extractPdf = require("./extractPdf");
 const extractPptx = require("./extractPptx");
+const chunkText=require("../chunking/chunkText.js")
 
 
 async function extractText(filePath, mimetype) {
+  let text=" ";
 
  
   if (mimetype === "application/pdf") {
     
-    return await extractPdf(filePath);
+    text= await extractPdf(filePath);
   }
 
  
-  if (
+  else if (
     mimetype ===
     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
   ) {
-    return await extractPptx(filePath);
-  }
+    text= await extractPptx(filePath);
+  }else throw new Error("Unsupported file type");
 
- 
-  throw new Error("Unsupported file type");
+  const chunks=chunkText(text);
+  return{
+    fullText:text,
+    chunks
+  };
+  
 }
 
 module.exports = extractText;
