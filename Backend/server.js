@@ -1,35 +1,56 @@
 const express = require("express");
-const multer=require("multer");
-const path=require("path");
+const multer = require("multer");
+const path = require("path");
+
+const extractText = require("./extractors/extractText");
+
 const app = express();
 const PORT = 8000;
 
-const storage=multer.diskStorage({
-    destination:function(req,file,cb){
-        cb(null,"uploads/");//callback(error,where to store)
-    },
-    filename:function(req,file,cb){
-        cb(null,Date.now()+path.extname(file.originalname));
 
-    },
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "uploads/");// error and where to upload
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  },
 });
 
-const upload=multer({storage:storage});
+const upload = multer({ storage });
 
-app.post("/upload",upload.single("file"),(req,res)=>{
-    if(!req.file){
-        return res.status(400).send("No file uploaded.");
+
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    //  Check file presence
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
     }
-      res.send(`File uploaded successfully: ${req.file.filename}`);
 
+    
+    const extractedText = await extractText(
+      req.file.path,
+      req.file.mimetype
+    );
+
+    res.json({
+      message: "File processed successfully",
+      filename: req.file.filename,
+      preview: extractedText.substring(0, 300),
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/", (req, res) => {
-  res.send("Backend is running ");
+  res.send("Backend is running");
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`Server running on http://127.0.0.1:${PORT}`);
 });
-
-
