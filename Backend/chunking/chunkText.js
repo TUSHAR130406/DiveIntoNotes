@@ -30,3 +30,8 @@ function chunkText(text, options = {}) {
 }
 
 module.exports = chunkText;
+
+
+// Classification would have made sense if there were no semantics,
+// because then we’d need categories to decide where to search.
+// But since we are using semantics, similarity directly gives the best chunk.
