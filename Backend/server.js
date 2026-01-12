@@ -5,19 +5,39 @@ require("dotenv").config();
 const extractText = require("./extractors/extractText");
 //const getEmbedding = require("./extractors/embedding"); // embedding function
 const { spawn } = require("child_process");
+const { askGeminiFromContext } = require("./llm/geminiClient");
+const { randomUUID } = require("crypto");
+
+const connectDB = require("./db");
+
+const authRoutes = require("./routes/auth");
+
 
 const app = express();
-app.use(express.json())
-;const PORT = 8000;
+app.use(express.json());
+
+
+app.use("/auth", authRoutes);
+// What this line means
+
+// It maps your router:
+
+// router.post("/signup")
+// router.post("/login")
+
+const PORT = 8000;
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, "uploads/");
   },
   filename: function (req, file, cb) {
-    cb(null, Date.now() + path.extname(file.originalname));
+    const ext = path.extname(file.originalname);
+    const uniqueName = randomUUID() + ext;
+    cb(null, uniqueName);
   },
 });
+
 
 const upload = multer({ storage });
 
@@ -254,6 +274,7 @@ function splitIntoSentences(text) {
     .filter(Boolean);
 }
 
+const CONFIDENCE_THRESHOLD = 0.45;
 
 
 app.post("/query", async (req, res) => {
@@ -323,14 +344,30 @@ for (let i = 0; i < sentences.length; i++) {
 
 
     // 3. Return best chunk
-    res.json({
+    // CONFIDENCE CHECK
+if (bestSentenceScore < CONFIDENCE_THRESHOLD) {
+  return res.json({
+    confidence: "low",
+    query,
+    fileName: bestMatch.originalFileName,
+    chunkSimilarity: bestScore,
+    sentenceSimilarity: bestSentenceScore,
+    message:
+      "Your notes may not fully cover this question. Do you want to consult an external AI using only your notes?"
+  });
+}
+
+// HIGH CONFIDENCE RESPONSE
+return res.json({
+  confidence: "high",
   query,
+  fileName: bestMatch.originalFileName,
   chunkSimilarity: bestScore,
   sentenceSimilarity: bestSentenceScore,
-  fileName: bestMatch.originalFileName, 
-  relevantText:bestSentence,
-  context: bestMatch.text
+  answer: bestSentence
 });
+
+
 
 
   } catch (err) {
@@ -340,11 +377,48 @@ for (let i = 0; i < sentences.length; i++) {
 });
 
 
+// lllm queryy
+app.post("/query/llm", async (req, res) => {
+  try {
+    const { query, context } = req.body;
+
+    if (!query || !context) {
+      return res.status(400).json({
+        error: "Both query and context are required"
+      });
+    }
+
+    const answer = await askGeminiFromContext({
+      query,
+      context
+    });
+
+    return res.json({
+      source: "gemini",
+      answer
+    });
+
+  } catch (err) {
+  console.error("Gemini FULL error:", err);
+
+  return res.status(500).json({
+    error: err.message || "Unknown Gemini error"
+  });
+}
+
+});
+
+
+
+
 
 
 app.get("/", (req, res) => {
   res.send("Backend is running");
 });
+
+connectDB();
+
 
 app.listen(PORT, () => {
   console.log(`Server running on http://127.0.0.1:${PORT}`);
