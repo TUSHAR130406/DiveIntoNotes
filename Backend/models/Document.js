@@ -14,7 +14,7 @@ const documentSchema= new mongoose.Schema({
     type: String,
     required: true
   },
-    mimeType: {
+    mimeType: {//type of file
     type: String,
     required: true
   },

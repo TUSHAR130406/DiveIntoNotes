@@ -11,6 +11,10 @@ const { randomUUID } = require("crypto");
 const connectDB = require("./db");
 
 const authRoutes = require("./routes/auth");
+const auth = require("./middleware/auth");
+
+const Document = require("./models/Document");
+const Chunk = require("./models/Chunk");
 
 
 const app = express();
@@ -41,7 +45,6 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-const memoryStore = [];
 
 async function getLocalEmbeddings(chunks) {
   return new Promise((resolve, reject) => {
@@ -69,7 +72,7 @@ async function getLocalEmbeddings(chunks) {
 
 
 
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload",auth, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
@@ -86,26 +89,49 @@ const chunks = rawChunks
   .filter(c => typeof c === "string" && c.trim().length > 0);
 
 
-    // Get embeddings from local Python model
+//     // Get embeddings from local Python model
     const embeddings = await getLocalEmbeddings(chunks);
 
-    const embeddedChunks = chunks.map((chunk, i) => ({
-  text: chunk,
-  embedding: embeddings[i],
+//     const embeddedChunks = chunks.map((chunk, i) => ({
+//   text: chunk,
+//   embedding: embeddings[i],
+//   originalFileName: req.file.originalname,
+//   storedFileName: req.file.filename,
+// }));
+
+
+//     // Store in memory (for now)
+//     memoryStore.push(...embeddedChunks);//... add chunks individually and not altogether as a list
+
+// Create Document record, we now replace emmeory store the above commented one was befpre
+const document = await Document.create({
+  userId: req.userId,
   originalFileName: req.file.originalname,
   storedFileName: req.file.filename,
+  mimeType: req.file.mimetype
+});
+
+// 2️ Prepare Chunk documents
+const chunkDocs = chunks.map((chunk, i) => ({
+  userId: req.userId,
+  documentId: document._id,
+  text: chunk,
+  embedding: embeddings[i]
 }));
 
 
-    // Store in memory (for now)
-    memoryStore.push(...embeddedChunks);//... add chunks individually and not altogether as a list
+await Chunk.insertMany(chunkDocs);
+
+
+
+
 
     res.json({
       message: "File processed successfully",
       filename: req.file.filename,
       totalChunks: chunks.length,
       previewChunks: chunks.slice(0, 2),
-      previewEmbeddings: embeddedChunks.slice(0, 2).map(c => c.embedding.length),
+      embeddingSize: embeddings[0]?.length || 0
     });
   } catch (err) {
     console.error(err);
@@ -277,7 +303,7 @@ function splitIntoSentences(text) {
 const CONFIDENCE_THRESHOLD = 0.45;
 
 
-app.post("/query", async (req, res) => {
+app.post("/query",auth, async (req, res) => {
   try {
     const { query } = req.body;
 
@@ -291,8 +317,10 @@ app.post("/query", async (req, res) => {
     let bestMatch = null;
     let bestScore = -1;
 
-    // 2. Compare with all stored chunks
-    for (const item of memoryStore) {
+const chunks = await Chunk.find({ userId: req.userId });
+
+
+    for (const item of chunks) {
       const score = cosineSimilarity(queryEmbedding, item.embedding);
 
       if (score > bestScore) {
@@ -300,7 +328,16 @@ app.post("/query", async (req, res) => {
         bestMatch = item;
       }
     }
-     
+
+    if (!bestMatch) {
+    return res.json({
+    confidence: "low",
+    message: "No notes found for this user."
+  });
+}
+
+   const document = await Document.findById(bestMatch.documentId);
+
 
     //snetence refinement
     // 1. Split top chunk into sentences
@@ -349,7 +386,7 @@ if (bestSentenceScore < CONFIDENCE_THRESHOLD) {
   return res.json({
     confidence: "low",
     query,
-    fileName: bestMatch.originalFileName,
+fileName: document.originalFileName,
     chunkSimilarity: bestScore,
     sentenceSimilarity: bestSentenceScore,
     message:
@@ -361,7 +398,7 @@ if (bestSentenceScore < CONFIDENCE_THRESHOLD) {
 return res.json({
   confidence: "high",
   query,
-  fileName: bestMatch.originalFileName,
+fileName: document.originalFileName,
   chunkSimilarity: bestScore,
   sentenceSimilarity: bestSentenceScore,
   answer: bestSentence
