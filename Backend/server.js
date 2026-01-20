@@ -1,10 +1,12 @@
 const express = require("express");
 const multer = require("multer");
+const cors = require("cors");
+
 const path = require("path");
 require("dotenv").config();
 const extractText = require("./extractors/extractText");
 //const getEmbedding = require("./extractors/embedding"); // embedding function
-const { spawn } = require("child_process");
+// const { spawn } = require("child_process");
 const { askGeminiFromContext } = require("./llm/geminiClient");
 const { randomUUID } = require("crypto");
 
@@ -15,10 +17,12 @@ const auth = require("./middleware/auth");
 
 const Document = require("./models/Document");
 const Chunk = require("./models/Chunk");
+const fs = require("fs");
 
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 
 app.use("/auth", authRoutes);
@@ -46,30 +50,44 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 
-async function getLocalEmbeddings(chunks) {
-  return new Promise((resolve, reject) => {
-    const py = spawn("python3", ["./generate_embeddings.py"]);
+// async function getLocalEmbeddings(chunks) {
+//   return new Promise((resolve, reject) => {
+//     const py = spawn("python3", ["./generate_embeddings.py"]);
 
-    let output = "";
-    py.stdout.on("data", (data) => {
-      output += data.toString();
-    });
+//     let output = "";
+//     py.stdout.on("data", (data) => {
+//       output += data.toString();
+//     });
 
-    py.stderr.on("data", (data) => {
-      console.error("Python error:", data.toString());
-    });
+//     py.stderr.on("data", (data) => {
+//       console.error("Python error:", data.toString());
+//     });
 
-    py.on("close", (code) => {
-      if (code !== 0) return reject(`Python exited with ${code}`);
-      resolve(JSON.parse(output));
-    });
+//     py.on("close", (code) => {
+//       if (code !== 0) return reject(`Python exited with ${code}`);
+//       resolve(JSON.parse(output));
+//     });
 
-    // Send chunks to Python stdin
-    py.stdin.write(JSON.stringify(chunks));
-    py.stdin.end();
+//     // Send chunks to Python stdin
+//     py.stdin.write(JSON.stringify(chunks));
+//     py.stdin.end();
+//   });
+// }
+
+async function getLocalEmbeddings(texts) {
+  const response = await fetch("http://127.0.0.1:5000/embed", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ texts })
   });
-}
 
+  if (!response.ok) {
+    throw new Error("Embedding service failed");
+  }
+
+  const data = await response.json();
+  return data.embeddings;
+}
 
 
 app.post("/upload",auth, upload.single("file"), async (req, res) => {
@@ -128,7 +146,9 @@ await Chunk.insertMany(chunkDocs);
 
     res.json({
       message: "File processed successfully",
-      filename: req.file.filename,
+      documentId: document._id,
+      originalFileName: req.file.originalname,
+      storedFileName: req.file.filename,
       totalChunks: chunks.length,
       previewChunks: chunks.slice(0, 2),
       embeddingSize: embeddings[0]?.length || 0
@@ -245,48 +265,51 @@ function cosineSimilarity(vecA, vecB) {
 // }
 
 
-// function centeredExpansion(sentences, scores, bestIdx, bestScore) {
-//   let left = bestIdx - 1;
-//   let right = bestIdx + 1;
+function centeredExpansion(sentences, scores, bestIdx, bestScore) {
+  let left = bestIdx - 1;
+  let right = bestIdx + 1;
 
-//   const selected = [
-//     { index: bestIdx, text: sentences[bestIdx], score: bestScore }
-//   ];
+  const selected = [
+    { index: bestIdx, text: sentences[bestIdx], score: bestScore }
+  ];
+  
+    const DELTA = 0.12;
+    const min_sim= 0.4;
 
-//   // Expand left
-//   while (left >= 0) {
-//     const score = scores[left];
+  // Expand left
+  while (left >= 0) {
+    const score = scores[left];
 
-//     if (score >= MIN_SIM || (bestScore - score) <= DELTA) {
-//       selected.unshift({
-//         index: left,
-//         text: sentences[left],
-//         score
-//       });
-//       left--;
-//     } else {
-//       break;
-//     }
-//   }
+    if ( score>=min_sim && (bestScore - score) <= DELTA) {
+      selected.unshift({
+        index: left,
+        text: sentences[left],
+        score
+      });
+      left--;
+    } else {
+      break;
+    }
+  }
 
-//   // Expand right
-//   while (right < sentences.length) {
-//     const score = scores[right];
+  // Expand right
+  while (right < sentences.length) {
+    const score = scores[right];
 
-//     if (score >= MIN_SIM || (bestScore - score) <= DELTA) {
-//       selected.push({
-//         index: right,
-//         text: sentences[right],
-//         score
-//       });
-//       right++;
-//     } else {
-//       break;
-//     }
-//   }
+    if ( score>=min_sim && (bestScore - score) <= DELTA) {
+      selected.push({
+        index: right,
+        text: sentences[right],
+        score
+      });
+      right++;
+    } else {
+      break;
+    }
+  }
 
-//   return selected;
-// }
+  return selected;
+}
 
 function splitIntoSentences(text) {
   const clean = text
@@ -300,72 +323,85 @@ function splitIntoSentences(text) {
     .filter(Boolean);
 }
 
-const CONFIDENCE_THRESHOLD = 0.45;
-
-
-app.post("/query",auth, async (req, res) => {
-  try {
-    const { query } = req.body;
-
-    if (!query) {
-      return res.status(400).json({ error: "Query is required" });
-    }
-
-    // 1. Get embedding for query
-    const [queryEmbedding] = await getLocalEmbeddings([query]);
-
-    let bestMatch = null;
-    let bestScore = -1;
-
-const chunks = await Chunk.find({ userId: req.userId });
-
-
-    for (const item of chunks) {
-      const score = cosineSimilarity(queryEmbedding, item.embedding);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = item;
-      }
-    }
-
-    if (!bestMatch) {
-    return res.json({
-    confidence: "low",
-    message: "No notes found for this user."
-  });
-}
-
-   const document = await Document.findById(bestMatch.documentId);
-
-
-    //snetence refinement
-    // 1. Split top chunk into sentences
-const sentences = splitIntoSentences(bestMatch.text);
-
-// 2. Embed sentences (on the fly)
-const sentenceEmbeddings = await getLocalEmbeddings(sentences);
-
-// 3. Find most relevant sentence(s)
-let bestSentence = null;
-let bestSentenceScore = -1;
-let bestSentenceIdx = -1;
-const sentenceScores = [];
+const EXISTENCE_THRESHOLD = 0.18;
+const TOP_K_CHUNKS = 2;
 
 
 
-for (let i = 0; i < sentences.length; i++) {
-  const score = cosineSimilarity(queryEmbedding, sentenceEmbeddings[i]);
+// app.post("/query",auth, async (req, res) => {
+//   try {
+//     const { query } = req.body;
 
-  if (score > bestSentenceScore) {
-    bestSentenceScore = score;
-    bestSentence = sentences[i];
-    sentenceScores[i]=score;
+//     if (!query) {
+//       return res.status(400).json({ error: "Query is required" });
+//     }
 
-        bestSentenceIdx = i;
+//     // 1. Get embedding for query
+//     const [queryEmbedding] = await getLocalEmbeddings([query]);
 
-  }
-}
+//     // let bestMatch = null;
+//     // let bestScore = -1;
+
+// const chunks = await Chunk.find({ userId: req.userId });
+//  if (chunks.length === 0) {
+//       return res.json({
+//         confidence: "low",
+//         message: "No notes found for this user."
+//       });
+//     }
+
+//     const rankedChunks = chunks
+//       .map(chunk => ({
+//         ...chunk.toObject(),
+//         similarity: cosineSimilarity(queryEmbedding, chunk.embedding)
+//       }))
+//       .sort((a, b) => b.similarity - a.similarity);
+
+//     const topChunks = rankedChunks.slice(0, TOP_K_CHUNKS);
+//     const bestChunkScore = topChunks[0].similarity;
+    
+//       if (bestChunkScore < EXISTENCE_THRESHOLD) {
+//       return res.json({
+//         confidence: "low",
+//         similarity: bestChunkScore,
+//         message:
+//           "This topic does not appear in your notes. Do you want to consult external AI?"
+//       });
+//     }
+
+
+
+
+//    const document = await Document.findById(topChunks[0].documentId);
+
+
+//     //snetence refinement
+//     // 1. Split top chunk into sentences
+// const sentences = splitIntoSentences(chunk.text);
+
+// // 2. Embed sentences (on the fly)
+// const sentenceEmbeddings = await getLocalEmbeddings(sentences);
+
+// // 3. Find most relevant sentence(s)
+// let bestSentence = null;
+// let bestSentenceScore = -1;
+// let bestSentenceIdx = -1;
+// const sentenceScores = [];
+
+
+
+// for (let i = 0; i < sentences.length; i++) {
+//   const score = cosineSimilarity(queryEmbedding, sentenceEmbeddings[i]);
+//   sentenceScores[i]=score;
+
+//   if (score > bestSentenceScore) {
+//     bestSentenceScore = score;
+//     bestSentence = sentences[i];
+
+//         bestSentenceIdx = i;
+
+//   }
+// }
 
 // const expandedSentences = centeredExpansion(
 //   sentences,
@@ -379,39 +415,224 @@ for (let i = 0; i < sentences.length; i++) {
 //   .join(" ");
 
 
-
-    // 3. Return best chunk
-    // CONFIDENCE CHECK
-if (bestSentenceScore < CONFIDENCE_THRESHOLD) {
-  return res.json({
-    confidence: "low",
-    query,
-fileName: document.originalFileName,
-    chunkSimilarity: bestScore,
-    sentenceSimilarity: bestSentenceScore,
-    message:
-      "Your notes may not fully cover this question. Do you want to consult an external AI using only your notes?"
-  });
-}
-
-// HIGH CONFIDENCE RESPONSE
-return res.json({
-  confidence: "high",
-  query,
-fileName: document.originalFileName,
-  chunkSimilarity: bestScore,
-  sentenceSimilarity: bestSentenceScore,
-  answer: bestSentence
-});
+//     const geminiContext = topChunks.map(c => c.text).join("\n\n");
+    
+//    const answer = await askGeminiFromContext({
+//       query,
+//       context: geminiContext
+//     });
 
 
+//     // 3. Return best chunk
+//     // CONFIDENCE CHECK
+// if (bestSentenceScore < CONFIDENCE_THRESHOLD) {
+//   return res.json({
+//     confidence: "low",
+//     query,
+// fileName: document.originalFileName,
+//     chunkSimilarity: bestScore,
+//     sentenceSimilarity: bestSentenceScore,
+//     sourceChunk: bestMatch.text,
+//     context: bestMatch.text,
+//     message:
+//       "Your notes may not fully cover this question. Do you want to consult an external AI using only your notes?"
+//   });
+// }
 
+// // HIGH CONFIDENCE RESPONSE
+// return res.json({
+//   confidence: "high",
+//   query,
+//   fileName: document.originalFileName,
+//   chunkSimilarity: bestScore,
+//   sentenceSimilarity: bestSentenceScore,
+//   answer: finalAnswer,
+//   sourceChunk: bestMatch.text
+// });
+
+
+
+
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: err.message });
+//   }
+// });
+
+
+
+///queryupdated
+app.post("/query", auth, async (req, res) => {
+  try {
+    const { query } = req.body;
+    if (!query) {
+      return res.status(400).json({ error: "Query is required" });
+    }
+
+    // 1️⃣ Embed query
+    const [queryEmbedding] = await getLocalEmbeddings([query]);
+
+    // 2️⃣ Fetch user chunks
+    const chunks = await Chunk.find({ userId: req.userId });
+    if (chunks.length === 0) {
+      return res.json({
+        confidence: "low",
+        message: "No notes found for this user."
+      });
+    }
+
+    // 3️⃣ Rank chunks
+    const rankedChunks = chunks
+      .map(chunk => ({
+        ...chunk.toObject(),
+        similarity: cosineSimilarity(queryEmbedding, chunk.embedding)
+      }))
+      .sort((a, b) => b.similarity - a.similarity);
+
+    const topChunks = rankedChunks.slice(0, TOP_K_CHUNKS);
+    const bestChunkScore = topChunks[0].similarity;
+
+    // 4️⃣ Existence check (ONLY this threshold matters)
+    if (bestChunkScore < EXISTENCE_THRESHOLD) {
+      return res.json({
+        confidence: "low",
+        similarity: bestChunkScore,
+        context: topChunks.slice(0, 2).map(c => c.text).join("\n\n"),
+        message:
+          " Your library may not contain this information. Do you want to consult external AI for grained search?"
+      });
+    }
+
+    // 5️⃣ Sentence refinement (for UI evidence ONLY)
+    const baseChunk = topChunks[0];
+    const sentences = splitIntoSentences(baseChunk.text);
+
+    const sentenceEmbeddings = await getLocalEmbeddings(sentences);
+
+    const sentenceScores = sentences.map((s, i) =>
+      cosineSimilarity(queryEmbedding, sentenceEmbeddings[i])
+    );
+
+    let bestSentenceIdx = sentenceScores.indexOf(
+      Math.max(...sentenceScores)
+    );
+
+    const expandedSentences = centeredExpansion(
+      sentences,
+      sentenceScores,
+      bestSentenceIdx,
+      sentenceScores[bestSentenceIdx]
+    );
+
+    const evidenceSentences = expandedSentences.map(s => s.text);
+
+    // Gemini context = FULL top chunks
+    const geminiContext = topChunks
+      .map(c => c.text)
+      .join("\n\n");
+
+    const answer = await askGeminiFromContext({
+      query,
+      context: geminiContext
+    });
+
+    //  Fetch filename (from best chunk)
+    const document = await Document.findById(baseChunk.documentId);
+
+    // Final response
+    return res.json({
+      confidence: "high",
+      similarity: bestChunkScore,
+      answer,
+      evidence: evidenceSentences,
+      source: document?.originalFileName
+    });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Query failed" });
   }
 });
+
+
+
+
+
+/// document list
+app.get("/documents", auth, async (req, res) => {
+  try {
+    const docs = await Document.find({ userId: req.userId })
+      .sort({ uploadedAt: -1 })
+      .select("_id originalFileName uploadedAt");
+
+    res.json(docs);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch documents" });
+  }
+});
+
+///download a document
+app.get("/documents/:id/download", auth, async (req, res) => {
+  try {
+    const doc = await Document.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!doc) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const filePath = path.join(__dirname, "uploads", doc.storedFileName);
+
+    res.download(filePath, doc.originalFileName);
+  } catch (err) {
+    res.status(500).json({ error: "Download failed" });
+  }
+});
+
+//delete query
+app.delete("/documents/:id", auth, async (req, res) => {
+  try {
+    const doc = await Document.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!doc) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    //  Delete all chunks for this document
+    await Chunk.deleteMany({ documentId: doc._id });
+
+   //  Delete document record
+    await Document.deleteOne({ _id: doc._id });
+
+    res.json({ message: "Document deleted successfully" });
+
+
+
+
+    //  Delete file from disk
+    const filePath = path.join(__dirname, "uploads", doc.storedFileName);
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn("File already missing:", filePath);
+    }
+
+    
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Delete failed" });
+  }
+});
+
+
+
+
 
 
 // lllm queryy
