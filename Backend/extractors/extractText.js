@@ -21,6 +21,12 @@ async function extractText(filePath, mimetype) {
   }else throw new Error("Unsupported file type");
 
   const chunks=chunkText(text);
+  if (!chunks || chunks.length === 0) {
+  throw new Error(
+    "No readable text found. Image-based PPT/PDF content is not supported yet."
+  );
+}
+
   return{
     fullText:text,
     chunks
