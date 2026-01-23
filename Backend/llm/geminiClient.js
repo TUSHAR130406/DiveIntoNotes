@@ -1,13 +1,11 @@
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-
 /**
  * Ask Gemini using STRICTLY provided context.
- * No external knowledge allowed.
+ * Gemini must decide whether the answer exists in context.
  */
 async function askGeminiFromContext({ query, context }) {
   if (!GEMINI_API_KEY) {
@@ -17,11 +15,20 @@ async function askGeminiFromContext({ query, context }) {
   const prompt = `
 You are a strict question-answering assistant.
 
+TASK:
+- Decide whether the QUESTION can be answered using ONLY the CONTEXT.
+
 RULES:
-- Answer ONLY using the provided context
-- If the answer is not in the context, say: "Not found in the provided notes."
-- Do NOT use external knowledge
-- Do NOT hallucinate
+- If the answer IS present in the context:
+  - Answer the question clearly and concisely.
+- If the answer is NOT present in the context:
+  - Respond with EXACTLY this string:
+    NOT_FOUND_IN_CONTEXT
+
+IMPORTANT:
+- Do NOT use any external knowledge.
+- Do NOT infer or guess.
+- Do NOT rephrase the context unless answering.
 
 CONTEXT:
 ${context}
@@ -40,9 +47,7 @@ ${query}
       body: JSON.stringify({
         contents: [
           {
-            parts: [
-              { text: prompt }
-            ]
+            parts: [{ text: prompt }]
           }
         ]
       })
@@ -55,7 +60,19 @@ ${query}
     throw new Error("No response from Gemini");
   }
 
-  return data.candidates[0].content.parts[0].text.trim();
+  const text = data.candidates[0].content.parts[0].text.trim();
+
+  if (text === "NOT_FOUND_IN_CONTEXT") {
+    return {
+      found: false,
+      answer: null
+    };
+  }
+
+  return {
+    found: true,
+    answer: text
+  };
 }
 
 module.exports = {

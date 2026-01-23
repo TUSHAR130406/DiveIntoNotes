@@ -8,6 +8,8 @@ const extractText = require("./extractors/extractText");
 //const getEmbedding = require("./extractors/embedding"); // embedding function
 // const { spawn } = require("child_process");
 const { askGeminiFromContext } = require("./llm/geminiClient");
+const { askGeminiGeneral } = require("./llm/generalgemini");
+
 const { randomUUID } = require("crypto");
 
 const connectDB = require("./db");
@@ -323,8 +325,8 @@ function splitIntoSentences(text) {
     .filter(Boolean);
 }
 
-const EXISTENCE_THRESHOLD = 0.18;
-const TOP_K_CHUNKS = 2;
+// const EXISTENCE_THRESHOLD = 0.18;
+ const TOP_K_CHUNKS = 3;
 
 
 
@@ -482,7 +484,7 @@ app.post("/query", auth, async (req, res) => {
       });
     }
 
-    // 3️⃣ Rank chunks
+    // 3️⃣ Rank chunks (still needed for shortlisting)
     const rankedChunks = chunks
       .map(chunk => ({
         ...chunk.toObject(),
@@ -490,21 +492,34 @@ app.post("/query", auth, async (req, res) => {
       }))
       .sort((a, b) => b.similarity - a.similarity);
 
+    // 4️⃣ Take top-K (NO threshold)
     const topChunks = rankedChunks.slice(0, TOP_K_CHUNKS);
-    const bestChunkScore = topChunks[0].similarity;
 
-    // 4️⃣ Existence check (ONLY this threshold matters)
-    if (bestChunkScore < EXISTENCE_THRESHOLD) {
+    const geminiContext = topChunks
+      .map(c => c.text)
+      .join("\n\n");
+
+    // 5️⃣ Ask Gemini to VALIDATE + ANSWER
+    const geminiResult = await askGeminiFromContext({
+      query,
+      context: geminiContext
+    });
+
+    // ❌ OLD: similarity threshold decision
+    // ✅ NEW: Gemini-based decision
+    if (!geminiResult.found) {
       return res.json({
         confidence: "low",
-        similarity: bestChunkScore,
-        context: topChunks.slice(0, 2).map(c => c.text).join("\n\n"),
+        context: topChunks
+          .slice(0, 2)
+          .map(c => c.text)
+          .join("\n\n"),
         message:
-          " Your library may not contain this information. Do you want to consult external AI for grained search?"
+          "Your notes do not contain this information. Do you want to consult external AI?"
       });
     }
 
-    // 5️⃣ Sentence refinement (for UI evidence ONLY)
+    // 6️⃣ Sentence refinement (UNCHANGED, UI-only)
     const baseChunk = topChunks[0];
     const sentences = splitIntoSentences(baseChunk.text);
 
@@ -514,7 +529,7 @@ app.post("/query", auth, async (req, res) => {
       cosineSimilarity(queryEmbedding, sentenceEmbeddings[i])
     );
 
-    let bestSentenceIdx = sentenceScores.indexOf(
+    const bestSentenceIdx = sentenceScores.indexOf(
       Math.max(...sentenceScores)
     );
 
@@ -527,30 +542,19 @@ app.post("/query", auth, async (req, res) => {
 
     const evidenceSentences = expandedSentences.map(s => s.text);
 
-    // Gemini context = FULL top chunks
-    const geminiContext = topChunks
-      .map(c => c.text)
-      .join("\n\n");
-
-    const answer = await askGeminiFromContext({
-      query,
-      context: geminiContext
-    });
-
-    //  Fetch filename (from best chunk)
+    // 7️⃣ Fetch source filename
     const document = await Document.findById(baseChunk.documentId);
 
-    // Final response
+    // 8️⃣ Final response (FOUND IN NOTES)
     return res.json({
-      confidence: "high",
-      similarity: bestChunkScore,
-      answer,
+      confidence: "high",               // 🔥 semantic confidence
+      answer: geminiResult.answer,      // 🔥 Gemini answer
       evidence: evidenceSentences,
       source: document?.originalFileName
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("Query error:", err);
     res.status(500).json({ error: "Query failed" });
   }
 });
@@ -635,35 +639,30 @@ app.delete("/documents/:id", auth, async (req, res) => {
 
 
 
-// lllm queryy
 app.post("/query/llm", async (req, res) => {
   try {
-    const { query, context } = req.body;
+    const { query } = req.body;
 
-    if (!query || !context) {
+    if (!query) {
       return res.status(400).json({
-        error: "Both query and context are required"
+        error: "Query is required"
       });
     }
 
-    const answer = await askGeminiFromContext({
-      query,
-      context
-    });
+    const answer = await askGeminiGeneral({ query });
 
     return res.json({
-      source: "gemini",
+      source: "external_ai",
       answer
     });
 
   } catch (err) {
-  console.error("Gemini FULL error:", err);
+    console.error("External Gemini error:", err);
 
-  return res.status(500).json({
-    error: err.message || "Unknown Gemini error"
-  });
-}
-
+    return res.status(500).json({
+      error: err.message || "External AI failed"
+    });
+  }
 });
 
 
